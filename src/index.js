@@ -8,6 +8,22 @@ const TOOL_TITLE = '前端沙箱';
 const DEFAULT_TRANSCRIPT = 'Initializing OpenWebContainer...\r\n';
 const MAX_TRANSCRIPT_LENGTH = 24000;
 
+function toDirtyPayload(data) {
+  const source = data && typeof data === 'object' ? data : {};
+  return {
+    transcript: typeof source.transcript === 'string' ? source.transcript : '',
+    files: source.files && typeof source.files === 'object' ? source.files : {}
+  };
+}
+
+function dirtyPayloadSignature(data) {
+  try {
+    return JSON.stringify(toDirtyPayload(data));
+  } catch (_) {
+    return '';
+  }
+}
+
 function ensureWorkspacePrefix(path) {
   const raw = String(path || '').trim();
   if (!raw) return '';
@@ -106,6 +122,9 @@ class SandboxTool {
     this.terminal = null;
     this.fitAddon = null;
     this.resizeHandler = null;
+    this.suspendDataChange = false;
+    this.lastDirtyPayloadSignature = dirtyPayloadSignature(this.data);
+    this.handleWheelWithinSandbox = this.handleWheelWithinSandbox.bind(this);
   }
 
   render() {
@@ -138,6 +157,7 @@ class SandboxTool {
     this.clearBtnEl.addEventListener('click', () => {
       this.data.transcript = '';
       this.resetTerminalSurface();
+      this.notifyDataChange('clear-output');
     });
 
     this.initTerminal();
@@ -174,6 +194,7 @@ class SandboxTool {
     this.fitAddon = new FitAddon();
     this.terminal.loadAddon(this.fitAddon);
     this.terminal.open(this.terminalHostEl);
+    this.wrapper.addEventListener('wheel', this.handleWheelWithinSandbox, { passive: true });
     this.fitTerminal();
     this.resetTerminalSurface();
 
@@ -185,6 +206,7 @@ class SandboxTool {
         if (data === '\r') {
           window.setTimeout(() => {
             this.data.files = this.snapshotFiles();
+            this.notifyDataChange('terminal-enter');
           }, 80);
         }
       } catch (error) {
@@ -219,6 +241,7 @@ class SandboxTool {
   async bootSandbox(forceReset) {
     if (this.busy) return;
     this.busy = true;
+    this.suspendDataChange = true;
     this.setStatus(forceReset ? 'Resetting sandbox...' : 'Starting sandbox...');
     try {
       await this.disposeContainer();
@@ -245,14 +268,20 @@ class SandboxTool {
       this.shellProcess = await this.container.spawn('sh', ['--osc'], undefined, { cwd: '/workspace' });
       this.attachShellListeners(this.shellProcess);
       this.data.files = this.snapshotFiles();
+      this.suspendDataChange = false;
+      if (forceReset) {
+        this.notifyDataChange('reset-sandbox');
+      }
       this.initialized = true;
       this.fitTerminal();
       this.setStatus('Sandbox ready. Type directly in the terminal.');
     } catch (error) {
+      this.suspendDataChange = false;
       const message = error && error.message ? error.message : String(error || 'Failed to start sandbox');
       this.setStatus(message, true);
       this.appendOutput(`\r\n[Sandbox error] ${message}\r\n`);
     } finally {
+      this.suspendDataChange = false;
       this.busy = false;
       this.applyReadOnly();
     }
@@ -309,6 +338,7 @@ class SandboxTool {
   appendOutput(chunk) {
     const text = String(chunk || '');
     this.data.transcript = clipTranscript((this.data.transcript || '') + text);
+    this.notifyDataChange('terminal-output');
     if (this.terminal) {
       this.terminal.write(text);
       this.terminal.scrollToBottom();
@@ -320,6 +350,23 @@ class SandboxTool {
     if (!this.statusEl) return;
     this.statusEl.textContent = this.data.status;
     this.statusEl.classList.toggle('is-error', !!isError);
+  }
+
+  handleWheelWithinSandbox(event) {
+    if (!this.wrapper || !this.wrapper.contains(event.target)) return;
+    event.stopPropagation();
+  }
+
+  notifyDataChange(reason) {
+    if (this.suspendDataChange) return;
+    const signature = dirtyPayloadSignature(this.data);
+    if (!signature || signature === this.lastDirtyPayloadSignature) return;
+    this.lastDirtyPayloadSignature = signature;
+    if (this.config && typeof this.config.onDataChange === 'function') {
+      try {
+        this.config.onDataChange({ reason, data: toDirtyPayload(this.data) });
+      } catch (_) {}
+    }
   }
 
   applyReadOnly() {
@@ -349,6 +396,7 @@ class SandboxTool {
   save() {
     this.data.files = this.snapshotFiles();
     this.data.transcript = clipTranscript(this.data.transcript || '');
+    this.lastDirtyPayloadSignature = dirtyPayloadSignature(this.data);
     return {
       transcript: this.data.transcript,
       files: this.data.files,
@@ -372,6 +420,11 @@ class SandboxTool {
         this.terminal.dispose();
       } catch (_) {}
       this.terminal = null;
+    }
+    if (this.wrapper) {
+      try {
+        this.wrapper.removeEventListener('wheel', this.handleWheelWithinSandbox);
+      } catch (_) {}
     }
     this.fitAddon = null;
   }

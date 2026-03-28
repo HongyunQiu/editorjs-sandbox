@@ -1439,6 +1439,9 @@ var ShellProcess = class extends Process {
       case "\x1B[D":
         this.handleLeftArrow();
         break;
+      case "	":
+        this.handleTabCompletion();
+        break;
       case "":
         this.handleCtrlC();
         break;
@@ -1565,6 +1568,92 @@ var ShellProcess = class extends Process {
       this.emitOutput(after);
       this.emitOutput(`\x1B[${after.length}D`);
     }
+  }
+  handleTabCompletion() {
+    const beforeCursor = this.currentLine.slice(0, this.cursorPosition);
+    const afterCursor = this.currentLine.slice(this.cursorPosition);
+    const endsWithSpace = /\s$/.test(beforeCursor);
+    const tokenMatch = beforeCursor.match(/(\S+)$/);
+    const token = tokenMatch ? tokenMatch[1] : "";
+    const tokenStart = tokenMatch ? beforeCursor.length - token.length : beforeCursor.length;
+    const commandPart = beforeCursor.slice(0, tokenStart);
+    const commandTokens = commandPart.trim().split(/\s+/).filter(Boolean);
+    const isCommandCompletion = commandTokens.length === 0 && !endsWithSpace;
+    const candidates = isCommandCompletion ? this.getCommandCompletionCandidates(token) : this.getPathCompletionCandidates(token);
+    if (candidates.length === 0) {
+      return;
+    }
+    if (candidates.length === 1) {
+      const completedToken = candidates[0];
+      const nextLine = beforeCursor.slice(0, tokenStart) + completedToken + afterCursor;
+      this.updateInputLine(nextLine);
+      return;
+    }
+    const commonPrefix = this.getLongestCommonPrefix(candidates);
+    if (commonPrefix && commonPrefix !== token) {
+      const nextLine = beforeCursor.slice(0, tokenStart) + commonPrefix + afterCursor;
+      this.updateInputLine(nextLine);
+      return;
+    }
+    this.emitOutput("\n" + candidates.join("  ") + "\n");
+    this.emitOutput(this.prompt + this.currentLine);
+    if (afterCursor) {
+      this.emitOutput(`\x1B[${afterCursor.length}D`);
+    }
+  }
+  getCommandCompletionCandidates(prefix) {
+    const buildIn = Array.from(this.shell.buildInCommands.keys());
+    const external = this.shell.commandRegistry.getAll();
+    const pathExecutables = [];
+    const PATH = this.env.get("PATH");
+    if (PATH) {
+      PATH.split(":").forEach((path) => {
+        try {
+          const entries = this.fileSystem.listDirectory(path) || [];
+          entries.forEach((entry) => {
+            const executablePath = this.fileSystem.resolvePath(entry, path);
+            if (this.fileSystem.fileExists(executablePath)) {
+              pathExecutables.push(entry);
+            }
+          });
+        } catch (_) {
+        }
+      });
+    }
+    return Array.from(new Set([...buildIn, ...external, ...pathExecutables])).filter((name) => name.startsWith(prefix)).sort();
+  }
+  getPathCompletionCandidates(token) {
+    const rawToken = token || "";
+    const lastSlashIndex = rawToken.lastIndexOf("/");
+    const pathPrefix = lastSlashIndex >= 0 ? rawToken.slice(0, lastSlashIndex + 1) : "";
+    const namePrefix = lastSlashIndex >= 0 ? rawToken.slice(lastSlashIndex + 1) : rawToken;
+    const baseDir = pathPrefix ? this.fileSystem.resolvePath(pathPrefix, this.shell.currentDirectory) : this.shell.currentDirectory;
+    let entries = [];
+    try {
+      entries = this.fileSystem.listDirectory(baseDir) || [];
+    } catch (_) {
+      return [];
+    }
+    return entries.filter((entry) => entry.startsWith(namePrefix)).map((entry) => {
+      const fullPath = this.fileSystem.resolvePath(entry, baseDir);
+      const isDir = this.fileSystem.isDirectory(fullPath);
+      return `${pathPrefix}${entry}${isDir ? "/" : " "}`;
+    }).sort();
+  }
+  getLongestCommonPrefix(values) {
+    if (!Array.isArray(values) || values.length === 0) {
+      return "";
+    }
+    let prefix = values[0];
+    for (let i = 1; i < values.length; i++) {
+      while (prefix && !values[i].startsWith(prefix)) {
+        prefix = prefix.slice(0, -1);
+      }
+      if (!prefix) {
+        return "";
+      }
+    }
+    return prefix;
   }
   updateInputLine(newLine) {
     this.emitOutput("\r\x1B[K");
