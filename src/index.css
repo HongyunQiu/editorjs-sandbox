@@ -1,0 +1,116 @@
+.cdx-sandbox {
+  --sandbox-bg: #0b1220;
+  --sandbox-panel: #111827;
+  --sandbox-border: #23304a;
+  --sandbox-text: #e5eefb;
+  --sandbox-muted: #8ca0bf;
+  --sandbox-accent: #7dd3fc;
+  --sandbox-success: #86efac;
+  --sandbox-danger: #fca5a5;
+  border: 1px solid var(--sandbox-border);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at top left, rgba(125, 211, 252, 0.12), transparent 36%),
+    linear-gradient(180deg, #0f172a 0%, var(--sandbox-bg) 100%);
+  color: var(--sandbox-text);
+  padding: 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.cdx-sandbox__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.cdx-sandbox__title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cdx-sandbox__title strong {
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.cdx-sandbox__title span {
+  font-size: 12px;
+  color: var(--sandbox-muted);
+}
+
+.cdx-sandbox__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.cdx-sandbox__button {
+  appearance: none;
+  border: 1px solid var(--sandbox-border);
+  background: rgba(17, 24, 39, 0.92);
+  color: var(--sandbox-text);
+  border-radius: 999px;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cdx-sandbox__button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--sandbox-accent) 48%, var(--sandbox-border));
+  background: rgba(20, 30, 52, 0.98);
+}
+
+.cdx-sandbox__button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.cdx-sandbox__status {
+  font-size: 12px;
+  color: var(--sandbox-muted);
+}
+
+.cdx-sandbox__status.is-error {
+  color: var(--sandbox-danger);
+}
+
+.cdx-sandbox__terminal {
+  border: 1px solid rgba(125, 211, 252, 0.18);
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.86);
+  overflow: hidden;
+}
+
+.cdx-sandbox__terminal-host {
+  min-height: 300px;
+  max-height: 460px;
+  padding: 10px 12px;
+}
+
+.cdx-sandbox__terminal-host .xterm {
+  padding-right: 2px;
+}
+
+.cdx-sandbox__terminal-host .xterm-viewport {
+  overflow-y: auto !important;
+  border-radius: 8px;
+}
+
+@media (max-width: 720px) {
+  .cdx-sandbox__header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .cdx-sandbox__actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+}
