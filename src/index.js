@@ -52,7 +52,8 @@ function buildInitialFiles(data, noteContextText) {
       '- pwd',
       '- cat README.md',
       '- cat note-context.md',
-      '- node hello.js'
+      '- node hello.js',
+      '- node qnotes-demo.js'
     ].join('\n');
   }
 
@@ -60,6 +61,16 @@ function buildInitialFiles(data, noteContextText) {
     files['/workspace/hello.js'] = [
       "console.log('Hello from QNotes sandbox');",
       "console.log('Terminal input is now connected directly to the shell process.');"
+    ].join('\n');
+  }
+
+  if (!files['/workspace/qnotes-demo.js']) {
+    files['/workspace/qnotes-demo.js'] = [
+      "console.log('Current note id:', qnotes.getCurrentNoteId());",
+      "console.log('Current user:', qnotes.getCurrentUser());",
+      "console.log('Available methods:', qnotes.help().methods.join(', '));",
+      "const tree = qnotes.notesListTree();",
+      "console.log('Visible root count:', Array.isArray(tree.tree) ? tree.tree.length : 0);"
     ].join('\n');
   }
 
@@ -246,7 +257,9 @@ class SandboxTool {
     try {
       await this.disposeContainer();
       this.initialized = false;
-      this.container = new OpenWebContainer();
+      this.container = new OpenWebContainer({
+        qnotesBridge: this.createQNotesBridge()
+      });
 
       const noteContextText = typeof this.config.getCurrentNoteContext === 'function'
         ? await this.config.getCurrentNoteContext()
@@ -285,6 +298,20 @@ class SandboxTool {
       this.busy = false;
       this.applyReadOnly();
     }
+  }
+
+  createQNotesBridge() {
+    const bridge = this.config && this.config.qnotesBridge && typeof this.config.qnotesBridge === 'object'
+      ? this.config.qnotesBridge
+      : null;
+
+    if (!bridge || typeof bridge.call !== 'function') {
+      return null;
+    }
+
+    return {
+      call: async (method, payload) => bridge.call(method, payload)
+    };
   }
 
   attachShellListeners(process) {

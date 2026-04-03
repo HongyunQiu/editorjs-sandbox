@@ -2319,10 +2319,11 @@ var statusCodeToStatusText = (statusCode) => {
 
 // src/process/executors/node/process.ts
 var NodeProcess = class extends Process {
-  constructor(pid, executablePath, args, fileSystem, networkManager, parantPid, cwd) {
+  constructor(pid, executablePath, args, fileSystem, networkManager, hostBridge, parantPid, cwd) {
     super(pid, "javascript" /* JAVASCRIPT */, executablePath, args, parantPid, cwd);
     this.fileSystem = fileSystem;
     this.networkManager = networkManager;
+    this.hostBridge = hostBridge || null;
   }
   async execute() {
     try {
@@ -2359,6 +2360,7 @@ var NodeProcess = class extends Process {
       }, true);
       this.httpModule = this.networkModule.createHttpModule();
       this.setupRequire(context);
+      this.setupQNotesBridge(context);
       const consoleObj = context.newObject();
       const logFn = context.newFunction("log", (...args) => {
         const output = args.map((arg) => `${context.dump(arg)}`).join(" ") + "\n";
@@ -2400,7 +2402,7 @@ var NodeProcess = class extends Process {
         if (firstLine.startsWith("#!")) {
           content = content.split("\n").slice(1).join("\n");
         }
-        const result = context.evalCode(content, this.executablePath, { type: "module" });
+        const result = await context.evalCodeAsync(content, this.executablePath, { type: "module" });
         while (runtime.hasPendingJob()) {
           const jobResult = runtime.executePendingJobs(10);
           if (jobResult.error) {
@@ -2472,6 +2474,90 @@ var NodeProcess = class extends Process {
     context.setProp(context.global, "exports", exportsObj);
     moduleObj.dispose();
     exportsObj.dispose();
+  }
+  setupQNotesBridge(context) {
+    const hostBridge = this.hostBridge && typeof this.hostBridge.call === "function" ? this.hostBridge : null;
+    const hostCallFn = context.newAsyncifiedFunction("__qnotesHostCall", async (methodHandle, argsHandle) => {
+      if (!hostBridge) {
+        throw new Error("QNotes bridge is not available");
+      }
+      const method = context.getString(methodHandle);
+      let args = {};
+      if (argsHandle && context.typeof(argsHandle) !== "undefined") {
+        const rawArgs = context.getString(argsHandle);
+        if (rawArgs) {
+          try {
+            args = JSON.parse(rawArgs);
+          } catch (error) {
+            throw new Error(`Invalid qnotes bridge payload: ${error.message}`);
+          }
+        }
+      }
+      const result = await hostBridge.call(method, args);
+      let serialized = "null";
+      try {
+        serialized = JSON.stringify(result == null ? null : result);
+      } catch (_) {
+        throw new Error(`QNotes bridge result for "${method}" is not serializable`);
+      }
+      return context.newString(serialized);
+    });
+    context.setProp(context.global, "__qnotesHostCall", hostCallFn);
+    hostCallFn.dispose();
+    const bootstrap = context.evalCode(`
+      globalThis.__qnotesBridgeCall = function(method, args) {
+        const payload = args == null ? {} : args;
+        const raw = __qnotesHostCall(String(method || ''), JSON.stringify(payload));
+        return raw ? JSON.parse(raw) : null;
+      };
+      globalThis.qnotes = Object.freeze({
+        call(method, args) {
+          return globalThis.__qnotesBridgeCall(method, args);
+        },
+        help() {
+          return globalThis.__qnotesBridgeCall('help', {});
+        },
+        getCurrentNoteId() {
+          return globalThis.__qnotesBridgeCall('getCurrentNoteId', {});
+        },
+        getCurrentUser() {
+          return globalThis.__qnotesBridgeCall('getCurrentUser', {});
+        },
+        getCurrentNoteContext() {
+          return globalThis.__qnotesBridgeCall('getCurrentNoteContext', {});
+        },
+        currentNote() {
+          return globalThis.__qnotesBridgeCall('currentNote', {});
+        },
+        noteGet(noteId) {
+          return globalThis.__qnotesBridgeCall('noteGet', { note_id: noteId });
+        },
+        noteLinkPreview(noteId) {
+          return globalThis.__qnotesBridgeCall('noteLinkPreview', { note_id: noteId });
+        },
+        notesListTree() {
+          return globalThis.__qnotesBridgeCall('notesListTree', {});
+        },
+        searchNotes(q, options) {
+          const opts = options && typeof options === 'object' ? options : {};
+          return globalThis.__qnotesBridgeCall('searchNotes', {
+            q,
+            limit: opts.limit,
+            offset: opts.offset
+          });
+        },
+        blocksQuery(params) {
+          return globalThis.__qnotesBridgeCall('blocksQuery', params && typeof params === 'object' ? params : {});
+        },
+        openNote(noteId) {
+          return globalThis.__qnotesBridgeCall('openNote', { note_id: noteId });
+        }
+      });
+    `, "qnotes-bridge.js");
+    if (bootstrap.error) {
+      throw new Error(`Failed to initialize qnotes bridge: ${context.dump(bootstrap.error)}`);
+    }
+    bootstrap.value.dispose();
   }
   async handleHttpRequest(request) {
     return new Promise((resolve, reject) => {
@@ -2558,9 +2644,10 @@ var NodeProcess = class extends Process {
 
 // src/process/executors/node/executor.ts
 var NodeProcessExecutor = class {
-  constructor(fileSystem, networkManager) {
+  constructor(fileSystem, networkManager, hostBridge) {
     this.fileSystem = fileSystem;
     this.networkManager = networkManager;
+    this.hostBridge = hostBridge || null;
   }
   canExecute(executable) {
     return executable === "node" || executable.endsWith(".js");
@@ -2585,6 +2672,7 @@ var NodeProcessExecutor = class {
       args,
       this.fileSystem,
       this.networkManager,
+      this.hostBridge,
       parentPid,
       cwd
     );
@@ -2975,6 +3063,7 @@ var OpenWebContainer = class {
   constructor(options = {}) {
     this.outputCallbacks = [];
     this.debugMode = options.debug || false;
+    this.hostBridge = options.qnotesBridge || null;
     this.fileSystem = new ZenFSCore();
     this.processManager = new ProcessManager();
     this.processRegistry = new ProcessRegistry();
@@ -2993,7 +3082,7 @@ var OpenWebContainer = class {
     });
     this.processRegistry.registerExecutor(
       "javascript",
-      new NodeProcessExecutor(this.fileSystem, this.networkManager)
+      new NodeProcessExecutor(this.fileSystem, this.networkManager, this.hostBridge)
     );
     this.processRegistry.registerExecutor(
       "shell",
