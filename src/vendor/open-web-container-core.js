@@ -2549,8 +2549,14 @@ var NodeProcess = class extends Process {
         blocksQuery(params) {
           return globalThis.__qnotesBridgeCall('blocksQuery', params && typeof params === 'object' ? params : {});
         },
-        openNote(noteId) {
-          return globalThis.__qnotesBridgeCall('openNote', { note_id: noteId });
+        appendParagraph(text) {
+          return globalThis.__qnotesBridgeCall('appendParagraph', { text });
+        },
+        appendBlocks(blocks) {
+          return globalThis.__qnotesBridgeCall('appendBlocks', { blocks });
+        },
+        insertBlocksAfterCurrent(blocks) {
+          return globalThis.__qnotesBridgeCall('insertBlocksAfterCurrent', { blocks });
         }
       });
     `, "qnotes-bridge.js");

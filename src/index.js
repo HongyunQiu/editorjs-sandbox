@@ -3,10 +3,21 @@ import '@xterm/xterm/css/xterm.css';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { OpenWebContainer } from './vendor/open-web-container-core.js';
+import { createDefaultWorkspaceFiles } from './default-sandbox-files.mjs';
+import {
+  buildWorkspaceManifest,
+  buildWorkspaceSignaturePayload,
+  ensureWorkspacePrefix,
+  normalizeWorkspaceFiles,
+  packWorkspaceFiles,
+  sha256Hex,
+  unpackWorkspaceArchive
+} from './workspace-asset.mjs';
 
 const TOOL_TITLE = '前端沙箱';
 const DEFAULT_TRANSCRIPT = 'Initializing OpenWebContainer...\r\n';
 const MAX_TRANSCRIPT_LENGTH = 24000;
+const SANDBOX_PIPELINE_NAME = 'sandbox-assetize';
 
 function toDirtyPayload(data) {
   const source = data && typeof data === 'object' ? data : {};
@@ -24,61 +35,200 @@ function dirtyPayloadSignature(data) {
   }
 }
 
-function ensureWorkspacePrefix(path) {
-  const raw = String(path || '').trim();
-  if (!raw) return '';
-  if (raw.startsWith('/workspace/')) return raw;
-  if (raw.startsWith('/')) return '/workspace' + raw;
-  return '/workspace/' + raw.replace(/^\.?\//, '');
+function getQNotesApp() {
+  if (typeof window === 'undefined') return null;
+  return window.QNotesApp && typeof window.QNotesApp === 'object' ? window.QNotesApp : null;
 }
 
-function buildInitialFiles(data, noteContextText) {
-  const files = {};
-  const savedFiles = data && data.files && typeof data.files === 'object' ? data.files : {};
-  Object.keys(savedFiles).forEach((path) => {
-    const normalizedPath = ensureWorkspacePrefix(path);
-    if (!normalizedPath) return;
-    files[normalizedPath] = String(savedFiles[path] == null ? '' : savedFiles[path]);
+function findPreviousBlockByIndex(app, index) {
+  if (!app || !app.state || !app.state.lastRenderedEditorData || !Array.isArray(app.state.lastRenderedEditorData.blocks)) {
+    return null;
+  }
+  if (!Number.isInteger(index) || index < 0) return null;
+  return app.state.lastRenderedEditorData.blocks[index] || null;
+}
+
+function cloneAssetRef(asset) {
+  if (!asset || typeof asset !== 'object') return null;
+  const url = typeof asset.url === 'string' ? asset.url : '';
+  if (!url) return null;
+  return {
+    url,
+    name: typeof asset.name === 'string' ? asset.name : '',
+    size: Number.isFinite(Number(asset.size)) ? Number(asset.size) : 0,
+    mime: typeof asset.mime === 'string' ? asset.mime : 'application/zip',
+    sha256: typeof asset.sha256 === 'string' ? asset.sha256 : ''
+  };
+}
+
+function normalizeFileManifest(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      const path = item && typeof item.path === 'string' ? ensureWorkspacePrefix(item.path) : '';
+      if (!path) return null;
+      return {
+        path,
+        size: Number.isFinite(Number(item.size)) ? Number(item.size) : 0
+      };
+    })
+    .filter(Boolean);
+}
+
+async function fetchWorkspaceFilesFromAsset(asset) {
+  const assetUrl = asset && typeof asset.url === 'string' ? asset.url.trim() : '';
+  if (!assetUrl) return {};
+
+  const response = await fetch(assetUrl, { credentials: 'same-origin' });
+  if (!response.ok) {
+    throw new Error(`failed to fetch sandbox asset: ${response.status}`);
+  }
+
+  const buffer = await response.arrayBuffer();
+  return unpackWorkspaceArchive(buffer);
+}
+
+function buildInitialFiles(savedFiles, noteContextText) {
+  const files = normalizeWorkspaceFiles(savedFiles);
+  const defaultFiles = createDefaultWorkspaceFiles(noteContextText);
+  Object.keys(defaultFiles).forEach((path) => {
+    if (!files[path]) {
+      files[path] = defaultFiles[path];
+    }
   });
 
-  if (!files['/workspace/README.md']) {
-    files['/workspace/README.md'] = [
-      '# QNotes Sandbox',
-      '',
-      'This is a browser sandbox block backed by OpenWebContainer.',
-      '',
-      'Try typing directly in the terminal:',
-      '- ls',
-      '- pwd',
-      '- cat README.md',
-      '- cat note-context.md',
-      '- node hello.js',
-      '- node qnotes-demo.js'
-    ].join('\n');
-  }
-
-  if (!files['/workspace/hello.js']) {
-    files['/workspace/hello.js'] = [
-      "console.log('Hello from QNotes sandbox');",
-      "console.log('Terminal input is now connected directly to the shell process.');"
-    ].join('\n');
-  }
-
-  if (!files['/workspace/qnotes-demo.js']) {
-    files['/workspace/qnotes-demo.js'] = [
-      "console.log('Current note id:', qnotes.getCurrentNoteId());",
-      "console.log('Current user:', qnotes.getCurrentUser());",
-      "console.log('Available methods:', qnotes.help().methods.join(', '));",
-      "const tree = qnotes.notesListTree();",
-      "console.log('Visible root count:', Array.isArray(tree.tree) ? tree.tree.length : 0);"
-    ].join('\n');
-  }
-
-  if (noteContextText && !files['/workspace/note-context.md']) {
-    files['/workspace/note-context.md'] = String(noteContextText);
-  }
-
   return files;
+}
+
+async function assetizeSandboxBlock(app, block, index) {
+  if (!block || block.type !== 'sandbox') {
+    return block;
+  }
+
+  const fn = app && app.fn ? app.fn : null;
+  if (!fn || typeof fn.uploadAttachmentBlobAsQNotes !== 'function') {
+    return block;
+  }
+
+  const data = block.data && typeof block.data === 'object' ? { ...block.data } : {};
+  const previousBlock = findPreviousBlockByIndex(app, index);
+  const previousData = previousBlock && previousBlock.data && typeof previousBlock.data === 'object'
+    ? previousBlock.data
+    : {};
+  const files = normalizeWorkspaceFiles(data.files);
+  const manifest = buildWorkspaceManifest(files);
+  const currentAsset = cloneAssetRef(data.asset);
+  const previousAsset = cloneAssetRef(previousData.asset);
+  const existingAsset = currentAsset || previousAsset;
+  const existingSha = typeof data.filesSha256 === 'string' && data.filesSha256
+    ? data.filesSha256
+    : (existingAsset && typeof existingAsset.sha256 === 'string' ? existingAsset.sha256 : '');
+
+  if (!manifest.length) {
+    return {
+      ...block,
+      data: {
+        ...data,
+        files: {},
+        asset: null,
+        filesSha256: '',
+        fileManifest: [],
+      }
+    };
+  }
+
+  const signaturePayload = buildWorkspaceSignaturePayload(files);
+  const sha256 = await sha256Hex(signaturePayload);
+
+  if (existingAsset && existingAsset.url && existingSha === sha256) {
+    return {
+      ...block,
+      data: {
+        ...data,
+        files: {},
+        asset: existingAsset,
+        filesSha256: sha256,
+        fileManifest: manifest,
+      }
+    };
+  }
+
+  const uploadCache = app.__sandboxAssetUploadCache = app.__sandboxAssetUploadCache || Object.create(null);
+  if (uploadCache[sha256]) {
+    return {
+      ...block,
+      data: {
+        ...data,
+        files: {},
+        asset: uploadCache[sha256],
+        filesSha256: sha256,
+        fileManifest: manifest,
+      }
+    };
+  }
+
+  const zipBytes = packWorkspaceFiles(files);
+  const filename = `sandbox-${sha256}.zip`;
+  const blob = new Blob([zipBytes], { type: 'application/zip' });
+  const uploadResult = await fn.uploadAttachmentBlobAsQNotes(blob, filename, { sha256 });
+  if (!uploadResult || !uploadResult.file || !uploadResult.file.url) {
+    throw new Error('Failed to upload sandbox workspace asset');
+  }
+
+  const asset = {
+    url: String(uploadResult.file.url),
+    name: typeof uploadResult.file.name === 'string' ? uploadResult.file.name : filename,
+    size: Number.isFinite(Number(uploadResult.file.size)) ? Number(uploadResult.file.size) : zipBytes.byteLength,
+    mime: 'application/zip',
+    sha256,
+  };
+  uploadCache[sha256] = asset;
+
+  return {
+    ...block,
+    data: {
+      ...data,
+      files: {},
+      asset,
+      filesSha256: sha256,
+      fileManifest: manifest,
+    }
+  };
+}
+
+function ensureSandboxCommitPipelineRegistered() {
+  const app = getQNotesApp();
+  if (!app || !app.fn || typeof app.fn.registerBeforeCommitPipeline !== 'function') {
+    return;
+  }
+
+  if (app.__sandboxCommitPipelineRegistered) {
+    return;
+  }
+
+  app.fn.registerBeforeCommitPipeline(
+    SANDBOX_PIPELINE_NAME,
+    async (data) => {
+      const editorData = data && typeof data === 'object' ? data : {};
+      const blocks = Array.isArray(editorData.blocks) ? editorData.blocks : [];
+      if (!blocks.length) {
+        return editorData;
+      }
+
+      const nextBlocks = [];
+      for (let index = 0; index < blocks.length; index += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        nextBlocks.push(await assetizeSandboxBlock(app, blocks[index], index));
+      }
+
+      return {
+        ...editorData,
+        blocks: nextBlocks,
+      };
+    }
+  );
+
+  app.__sandboxCommitPipelineRegistered = true;
 }
 
 function clipTranscript(text) {
@@ -104,18 +254,26 @@ class SandboxTool {
       transcript: {},
       files: {},
       status: {},
-      lastInput: {}
+      lastInput: {},
+      asset: false,
+      filesSha256: false,
+      fileManifest: false
     };
   }
 
   constructor({ data, config, readOnly }) {
+    ensureSandboxCommitPipelineRegistered();
+
     this.config = config || {};
     this.readOnly = !!readOnly;
     this.data = {
       transcript: typeof data?.transcript === 'string' ? data.transcript : DEFAULT_TRANSCRIPT,
       files: data?.files && typeof data.files === 'object' ? data.files : {},
       status: typeof data?.status === 'string' ? data.status : '',
-      lastInput: typeof data?.lastInput === 'string' ? data.lastInput : ''
+      lastInput: typeof data?.lastInput === 'string' ? data.lastInput : '',
+      asset: cloneAssetRef(data?.asset),
+      filesSha256: typeof data?.filesSha256 === 'string' ? data.filesSha256 : '',
+      fileManifest: normalizeFileManifest(data?.fileManifest)
     };
 
     this.wrapper = null;
@@ -217,6 +375,7 @@ class SandboxTool {
         if (data === '\r') {
           window.setTimeout(() => {
             this.data.files = this.snapshotFiles();
+            this.data.fileManifest = buildWorkspaceManifest(this.data.files);
             this.notifyDataChange('terminal-enter');
           }, 80);
         }
@@ -264,7 +423,16 @@ class SandboxTool {
       const noteContextText = typeof this.config.getCurrentNoteContext === 'function'
         ? await this.config.getCurrentNoteContext()
         : '';
-      const files = buildInitialFiles(this.data, noteContextText);
+      let persistedFiles = normalizeWorkspaceFiles(this.data.files);
+      if (!Object.keys(persistedFiles).length && this.data.asset && this.data.asset.url) {
+        try {
+          persistedFiles = await fetchWorkspaceFilesFromAsset(this.data.asset);
+        } catch (error) {
+          const message = error && error.message ? error.message : String(error || 'Failed to load sandbox asset');
+          this.appendOutput(`\r\n[Sandbox asset] ${message}\r\n`);
+        }
+      }
+      const files = buildInitialFiles(persistedFiles, noteContextText);
 
       try {
         this.container.createDirectory('/workspace');
@@ -281,6 +449,7 @@ class SandboxTool {
       this.shellProcess = await this.container.spawn('sh', ['--osc'], undefined, { cwd: '/workspace' });
       this.attachShellListeners(this.shellProcess);
       this.data.files = this.snapshotFiles();
+      this.data.fileManifest = buildWorkspaceManifest(this.data.files);
       this.suspendDataChange = false;
       if (forceReset) {
         this.notifyDataChange('reset-sandbox');
@@ -333,6 +502,7 @@ class SandboxTool {
       this.initialized = false;
       this.setStatus(`Shell exited with code ${exitCode}`, exitCode !== 0);
       this.data.files = this.snapshotFiles();
+      this.data.fileManifest = buildWorkspaceManifest(this.data.files);
     };
 
     process.addEventListener('message', onMessage);
@@ -422,13 +592,17 @@ class SandboxTool {
 
   save() {
     this.data.files = this.snapshotFiles();
+    this.data.fileManifest = buildWorkspaceManifest(this.data.files);
     this.data.transcript = clipTranscript(this.data.transcript || '');
     this.lastDirtyPayloadSignature = dirtyPayloadSignature(this.data);
     return {
       transcript: this.data.transcript,
       files: this.data.files,
       status: this.data.status,
-      lastInput: this.data.lastInput
+      lastInput: this.data.lastInput,
+      asset: this.data.asset,
+      filesSha256: this.data.filesSha256,
+      fileManifest: this.data.fileManifest
     };
   }
 
